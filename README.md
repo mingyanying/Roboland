@@ -3,5 +3,5 @@ Will be a good game 01/14/2025
 
 # Demo 
 Beginning of the training.
-[![Demo](assets/DemoCover.png)](https://www.youtube.com/watch?v=3q-qDRGiz1I)
+[![Demo](Assets/DemoCover.png)](https://www.youtube.com/watch?v=3q-qDRGiz1I)
 
