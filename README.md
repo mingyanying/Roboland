@@ -7,3 +7,7 @@ Click the image below to watch.
 
 [![Demo](Assets/DemoCover.png)](https://www.youtube.com/watch?v=3q-qDRGiz1I)
 
+# In progress
+Improvement after 8000 episodes of training.
+
+![Demo](Assets/ProjectDemo EBBSB 2025 img(1).png)
