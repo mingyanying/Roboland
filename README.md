@@ -10,4 +10,4 @@ Click the image below to watch.
 # In progress
 Improvement after 8000 episodes of training.
 
-![Demo](Assets/ProjectDemo EBBSB 2025 img(1).png)
+![Demo](Assets/ProjectDemo_EBBSB_2025_img_1.png)
