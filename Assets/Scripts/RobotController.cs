@@ -2,6 +2,8 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using System.Linq;
+using System;
+using Unity.VisualScripting;
 
 public class RobotController : MonoBehaviour
 {
@@ -51,7 +53,7 @@ public class RobotController : MonoBehaviour
     private Rigidbody handLeftRb;
     private Rigidbody handRightRb;
 
-    public float rotationForce = 120f;
+    public float rotationForce = 200f;
     private Motor[] motors;
     private float[] currentFactors;
 
@@ -59,6 +61,12 @@ public class RobotController : MonoBehaviour
     private List<Rigidbody> partsRigidbodies;
     private Vector3[] initialPositions;
     private Quaternion[] initialRotations;
+    private float[] jointAngles = new float[24];
+    private float[] jointSpeeds = new float[24];
+    private float[] previousJointAngles = new float[24];
+    public float[] visionData;
+    public const float InferenceInterval = 0.02f;
+
 
     // New method to set color of a specific part or all parts
     public void SetPartColor(GameObject part, Color color)
@@ -120,7 +128,7 @@ public class RobotController : MonoBehaviour
                 rotationAxis = hingeJoint.transform.TransformDirection(hingeJoint.axis);
                 currentAngle = hingeJoint.angle;
                 JointLimits limits = hingeJoint.limits;
-                float tolerance = 1f;
+                float tolerance = 2f;
                 // Check if at limit and trying to move further in that direction
                 atLimit = (currentAngle >= limits.max - tolerance && factor > 0) || (currentAngle <= limits.min + tolerance && factor < 0);
             }
@@ -175,7 +183,7 @@ public class RobotController : MonoBehaviour
         {
             float minLimit = 0f;
             float maxLimit = 0f;
-            float tolerance = 1f; // Small tolerance to avoid jitter near limits
+            float tolerance = 2f; // Small tolerance to avoid jitter near limits
 
             if (mode == JointDriveMode.X)
             {
@@ -330,6 +338,33 @@ public class RobotController : MonoBehaviour
             footLeft.transform, footRight.transform
         };
 
+        // Create a PhysicMaterial for friction
+        PhysicMaterial robotFrictionMaterial = new PhysicMaterial
+        {
+            dynamicFriction = 1f,  // Adjust as needed (0 to 1, where 0 is no friction, 1 is max)
+            staticFriction = 1.2f,   // Adjust as needed (0 to 1)
+            frictionCombine = PhysicMaterialCombine.Maximum, // How friction combines with other objects
+            bounciness = 0f          // Optional: Set to 0 for no bounce
+        };
+    
+        // Assign friction to all parts via their colliders
+        foreach (Transform part in partsTransforms)
+        {
+            if (part != null)
+            {
+                Collider collider = part.GetComponent<Collider>();
+                if (collider != null)
+                {
+                    collider.material = robotFrictionMaterial;
+                    //Debug.Log($"Assigned friction material to {part.name}");
+                }
+                else
+                {
+                    Debug.LogWarning($"No Collider found on {part.name}, skipping friction assignment.");
+                }
+            }
+        }
+
         partsRigidbodies = new List<Rigidbody>
         {
             headRb, torsoUpperRb, torsoLowerRb,
@@ -347,6 +382,18 @@ public class RobotController : MonoBehaviour
         SetPartColor(handRight, Color.black);
         SetPartColor(footLeft, Color.black);
         SetPartColor(footRight, Color.black);
+        //SetPartColor(legLeftLower, Color.black);
+        //SetPartColor(legRightLower, Color.black);
+        //SetPartColor(legLeftUpper, Color.black);
+        //SetPartColor(legRightUpper, Color.black);
+        //SetPartColor(head, Color.Lerp(Color.red, Color.yellow, 0.5f));
+        //SetPartColor(torsoLower, Color.Lerp(Color.red, Color.yellow, 0.5f));
+        //SetPartColor(torsoUpper, Color.Lerp(Color.red, Color.yellow, 0.5f));
+        //SetPartColor(armLeftLower, Color.Lerp(Color.red, Color.yellow, 0.5f));
+        //SetPartColor(armRightLower, Color.Lerp(Color.red, Color.yellow, 0.5f));
+        //SetPartColor(armLeftUpper, Color.Lerp(Color.red, Color.yellow, 0.5f));
+        //SetPartColor(armRightUpper, Color.Lerp(Color.red, Color.yellow, 0.5f));
+        
     }
 
     void Start()
@@ -360,15 +407,15 @@ public class RobotController : MonoBehaviour
         {
             for (int i = 0; i < motors.Length; i++)
             {
-                if (i % 3 == 0)
+                if (i == 21)
                 {
-                    motors[i].ApplyTorque(1, rotationForce);
-                }
-                else
-                {
-                    motors[i].ApplyTorque(-1, rotationForce);
+                    motors[i].ApplyTorque(2, rotationForce);
                 }
             }
+        }
+        if (Input.GetKey(KeyCode.P))
+        {
+            ResetRobot();
         }
         
     }
@@ -380,7 +427,7 @@ public class RobotController : MonoBehaviour
         for (int i = 0; i < motors.Length; i++)
         {
             motors[i].ApplyTorque(currentFactors[i], rotationForce);
-            //Debug.Log($"Applying torque to motor {i}: factor = {currentFactors[i]}");
+            // Debug.Log($"Applying torque to motor {i}: factor = {currentFactors[i]}");
         }
     }
 
@@ -436,6 +483,58 @@ public class RobotController : MonoBehaviour
         return angles;
     }
 
+    public float[] GetVisionData()
+    {
+        // VisionData
+        float[] visionData = new float[128]; // 256 distances + 256 indicators
+        
+        Vector3 forward = head.transform.forward;
+        Vector3 right = head.transform.right;
+        Vector3 up = head.transform.up;
+
+        
+        // Get the target from TargetManager
+        Transform target = TargetManager.Instance?.GetTarget();
+
+        if (head == null)
+        {
+            Debug.LogError("Head transform is not assigned!");
+            return visionData; // Returns a zeroed array
+        }
+
+        int rayCount = 8; // 16x16 grid = 256 rays
+        float angleStep = 90f / (rayCount - 1); // Step size for -60° to 60°
+
+        int index = 0;
+        for (int i = 0; i < rayCount; i++)
+        {
+            for (int j = 0; j < rayCount; j++)
+            {
+                float horizontalAngle = -45f + i * angleStep;
+                float verticalAngle = -45f + j * angleStep;
+
+                // Calculate ray direction
+                Quaternion rotH = Quaternion.AngleAxis(horizontalAngle, up);
+                Quaternion rotV = Quaternion.AngleAxis(verticalAngle, right);
+                Vector3 rayDirection = rotV * rotH * forward;
+
+                RaycastHit hit;
+                if (Physics.Raycast(head.transform.position, rayDirection, out hit, 50f))
+                {
+                    visionData[index] = hit.distance / 50f; // Normalize to [0, 1]
+                    visionData[index + 64] = (hit.transform == target) ? 1f : 0f; // Target check
+                }
+                else
+                {
+                    visionData[index] = 1f; // Max distance, normalized
+                    visionData[index + 64] = 0f; // No target
+                }
+                index++;
+            }
+        }
+        return visionData;
+    }
+
     public void ResetRobot()
     {
         //Debug.Log($"Resetting robot at time {Time.time}");
@@ -447,4 +546,65 @@ public class RobotController : MonoBehaviour
             partsRigidbodies[i].angularVelocity = Vector3.zero;
         }
     }
+
+    public float AngleDelta(float current, float previous)
+    {
+        float delta = current - previous;
+        while (delta > 180) delta -= 360;
+        while (delta < -180) delta += 360;
+        return delta;
+    }
+
+    public float[] GetJointSpeeds()
+    {
+        float[] currentAngles = GetJointAngles();
+        for (int i = 0; i < 24; i++)
+        {
+            jointAngles[i] = currentAngles[i];
+            float deltaAngle = AngleDelta(jointAngles[i], previousJointAngles[i]);
+            jointSpeeds[i] = deltaAngle / InferenceInterval;
+            previousJointAngles[i] = jointAngles[i];
+        }
+        return jointSpeeds;
+    }
+
+    // Implemented GetCurrentState method
+    public float[] GetCurrentState(float skillNumber)
+    {
+        float[] inputs = new float[180]; // Updated to match NeuralNetwork.cs InputSize
+        int index = 0;
+
+        float[] angles = GetJointAngles();
+        float[] speeds = GetJointSpeeds();
+
+        // Joint angles (normalized to [-1, 1])
+        for (int i = 0; i < 24; i++)
+            inputs[index++] = Mathf.Clamp(angles[i] / 180f, -1f, 1f);
+
+        // Joint speeds (normalized to [-1, 1])
+        for (int i = 0; i < 24; i++)
+            inputs[index++] = Mathf.Clamp(speeds[i] / 360f, -1f, 1f);
+
+        // Skill number
+        inputs[index++] = Mathf.Clamp(skillNumber, -1f, 1f);
+
+        // Placeholder for rotations (SetMoreBots.cs handles this)
+        inputs[index++] = 0f; // Pitch
+        inputs[index++] = 0f; // Roll
+        inputs[index++] = 0f; // Directional factor
+
+        // Add vision data
+        float[] visionData = GetVisionData();
+        for (int i = 0; i < 128; i++)
+            inputs[index++] = visionData[i];
+
+        // Debug the final array size
+        // Debug.Log($"SetMoreBots.GetCurrentState: Final index = {index}, Array length = {inputs.Length}");
+        if (index != 180)
+            Debug.LogError($"SetMoreBots.GetCurrentState: Index ({index}) does not match expected size (180)!");
+
+        return inputs;
+    }
+
+    
 }

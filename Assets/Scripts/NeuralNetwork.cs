@@ -1,3 +1,11 @@
+/* 
+The GetCurrentState() and GetJointSpeed() functions should be under RobotController.cs, 
+it is a data collection job shouldn't be done under the data processing part.
+I will fix it in the future, and bring this experience into my next project.
+*/
+
+// Note: G5 180 -> 128 -> 64 -> 32 -> 24
+// Note: G6 180 -> 256 -> 128 -> 64 -> 24
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -7,28 +15,31 @@ using System.Linq;
 
 public class NeuralNetwork : MonoBehaviour
 {
-    private const int InputSize = 52;
+    private const int InputSize = 52 + 128;
     private const int HiddenSize1 = 128;
     private const int HiddenSize2 = 64;
+    private const int HiddenSize3 = 32; // New hidden layer size
     private const int OutputSize = 24;
 
     private float[,] weightsInputHidden1;
     private float[] biasesHidden1;
     private float[,] weightsHidden1Hidden2;
     private float[] biasesHidden2;
-    private float[,] weightsHidden2Output;
+    private float[,] weightsHidden2Hidden3; // New weight matrix for hidden layer 3
+    private float[] biasesHidden3; // New bias vector for hidden layer 3
+    private float[,] weightsHidden3Output;
     private float[] biasesOutput;
 
     private float[] jointAngles = new float[24];
     private float[] jointSpeeds = new float[24];
     private float[] previousJointAngles = new float[24];
-    private float skillNumber = 1f;
-
+    
+    private float skillNumber = 2f;
+    float learningRate = 0.05f;
+    float perturbationScale = 1f;
     public RobotController robotController;
 
     private float timer = 0f;
-    private const float InferenceInterval = 0.02f;
-
     private float[] lastOutput;
 
     private Rigidbody torsoUpperRb;
@@ -41,7 +52,9 @@ public class NeuralNetwork : MonoBehaviour
         biasesHidden1 = new float[HiddenSize1];
         weightsHidden1Hidden2 = new float[HiddenSize1, HiddenSize2];
         biasesHidden2 = new float[HiddenSize2];
-        weightsHidden2Output = new float[HiddenSize2, OutputSize];
+        weightsHidden2Hidden3 = new float[HiddenSize2, HiddenSize3]; // New weight matrix
+        biasesHidden3 = new float[HiddenSize3]; // New bias vector
+        weightsHidden3Output = new float[HiddenSize3, OutputSize];
         biasesOutput = new float[OutputSize];
 
         if (robotController != null && robotController.torsoUpper != null)
@@ -68,21 +81,27 @@ public class NeuralNetwork : MonoBehaviour
             return;
         }
         Debug.Log("RobotController reference found: " + robotController.name);
+
         CollectJointData();
         for (int i = 0; i < 24; i++)
         {
             previousJointAngles[i] = jointAngles[i];
         }
+
+        
     }
 
     void FixedUpdate()
     {
         timer += Time.fixedDeltaTime;
-        if (timer >= InferenceInterval)
+        if (timer >= RobotController.InferenceInterval)
         {
             CollectJointData();
             float[] inputs = PrepareInputs();
+            
+            robotController.visionData = robotController.GetVisionData();
             lastOutput = ForwardPass(inputs);
+
             if (robotController != null)
             {
                 robotController.SetMotorFactors(lastOutput);
@@ -111,7 +130,7 @@ public class NeuralNetwork : MonoBehaviour
                 return null;
             }
         }
-        return Path.Combine(modelsDir, "modelG1.json");
+        return Path.Combine(modelsDir, "modelG5.json");
     }
 
     private void LoadModel()
@@ -134,7 +153,9 @@ public class NeuralNetwork : MonoBehaviour
                 biasesHidden1 = modelData.biasesHidden1;
                 weightsHidden1Hidden2 = modelData.weightsHidden1Hidden2.To2DArray();
                 biasesHidden2 = modelData.biasesHidden2;
-                weightsHidden2Output = modelData.weightsHidden2Output.To2DArray();
+                weightsHidden2Hidden3 = modelData.weightsHidden2Hidden3.To2DArray(); // Load new weights
+                biasesHidden3 = modelData.biasesHidden3; // Load new biases
+                weightsHidden3Output = modelData.weightsHidden3Output.To2DArray();
                 biasesOutput = modelData.biasesOutput;
                 skillNumber = modelData.skillNumber;
 
@@ -159,7 +180,9 @@ public class NeuralNetwork : MonoBehaviour
         InitializeBiases(biasesHidden1);
         InitializeWeights(weightsHidden1Hidden2);
         InitializeBiases(biasesHidden2);
-        InitializeWeights(weightsHidden2Output);
+        InitializeWeights(weightsHidden2Hidden3);
+        InitializeBiases(biasesHidden3);
+        InitializeWeights(weightsHidden3Output);
         InitializeBiases(biasesOutput);
         SaveModel();
     }
@@ -179,7 +202,9 @@ public class NeuralNetwork : MonoBehaviour
             biasesHidden1 = biasesHidden1,
             weightsHidden1Hidden2 = new SerializableMatrix(weightsHidden1Hidden2),
             biasesHidden2 = biasesHidden2,
-            weightsHidden2Output = new SerializableMatrix(weightsHidden2Output),
+            weightsHidden2Hidden3 = new SerializableMatrix(weightsHidden2Hidden3), // Save new weights
+            biasesHidden3 = biasesHidden3, // Save new biases
+            weightsHidden3Output = new SerializableMatrix(weightsHidden3Output),
             biasesOutput = biasesOutput,
             skillNumber = skillNumber
         };
@@ -202,18 +227,10 @@ public class NeuralNetwork : MonoBehaviour
         for (int i = 0; i < 24; i++)
         {
             jointAngles[i] = currentAngles[i];
-            float deltaAngle = AngleDelta(jointAngles[i], previousJointAngles[i]);
-            jointSpeeds[i] = deltaAngle / InferenceInterval;
+            float deltaAngle = robotController.AngleDelta(jointAngles[i], previousJointAngles[i]);
+            jointSpeeds[i] = deltaAngle / RobotController.InferenceInterval;
             previousJointAngles[i] = jointAngles[i];
         }
-    }
-
-    private float AngleDelta(float current, float previous)
-    {
-        float delta = current - previous;
-        while (delta > 180) delta -= 360;
-        while (delta < -180) delta += 360;
-        return delta;
     }
 
     private float[] PrepareInputs()
@@ -248,6 +265,19 @@ public class NeuralNetwork : MonoBehaviour
             inputs[index++] = 0f;
             Debug.LogWarning("Torso data unavailable, using zero inputs for pitch, roll, and directional factor.");
         }
+
+        // Append vision data
+        float[] visionData = robotController.GetVisionData();
+        for (int i = 0; i < 128; i++)
+            inputs[index++] = visionData[i];
+
+        if (inputs.Any(x => float.IsNaN(x)))
+            Debug.LogError("NaN detected in inputs!");
+
+        // Debug the final index and array size
+        // Debug.Log($"PrepareInputs: Final index = {index}, Array length = {inputs.Length}");
+        if (index != 180)
+            Debug.LogError($"PrepareInputs: Index ({index}) does not match expected size (180)!");
 
         return inputs;
     }
@@ -295,39 +325,228 @@ public class NeuralNetwork : MonoBehaviour
         return rotations;
     }
 
-    private float[] ForwardPass(float[] inputs)
+    public float[] GetLegLeftLowerRotation()
     {
+        float[] rotations = new float[3];
+       
+        Vector3 totalAcceleration = Physics.gravity; // Fallback to gravity
+        
+        Vector3 gravityDir = -totalAcceleration.normalized;
+        Vector3 localUp = robotController.legLeftLower.transform.up;
+
+        Vector3 forward = robotController.legLeftLower.transform.forward;
+        Vector3 gravityOnXZ = Vector3.ProjectOnPlane(gravityDir, localUp);
+        float pitch = Vector3.SignedAngle(localUp, gravityOnXZ, forward);
+        pitch = Mathf.Clamp(pitch, -90f, 90f);
+        rotations[0] = pitch / 90f;
+
+        Vector3 right = robotController.legLeftLower.transform.right;
+        Vector3 gravityOnYZ = Vector3.ProjectOnPlane(gravityDir, right);
+        float roll = Vector3.SignedAngle(localUp, gravityOnYZ, right);
+        roll = Mathf.Clamp(roll, -90f, 90f);
+        rotations[1] = roll / 90f;
+
+        float dotProduct = Vector3.Dot(gravityDir, localUp);
+        rotations[2] = Mathf.Sign(dotProduct);
+
+        return rotations;
+    }
+
+    public float[] GetLegRightLowerRotation()
+    {
+        float[] rotations = new float[3];
+       
+        Vector3 totalAcceleration = Physics.gravity; // Fallback to gravity
+        
+        Vector3 gravityDir = -totalAcceleration.normalized;
+        Vector3 localUp = robotController.legRightLower.transform.up;
+
+        Vector3 forward = robotController.legRightLower.transform.forward;
+        Vector3 gravityOnXZ = Vector3.ProjectOnPlane(gravityDir, localUp);
+        float pitch = Vector3.SignedAngle(localUp, gravityOnXZ, forward);
+        pitch = Mathf.Clamp(pitch, -90f, 90f);
+        rotations[0] = pitch / 90f;
+
+        Vector3 right = robotController.legRightLower.transform.right;
+        Vector3 gravityOnYZ = Vector3.ProjectOnPlane(gravityDir, right);
+        float roll = Vector3.SignedAngle(localUp, gravityOnYZ, right);
+        roll = Mathf.Clamp(roll, -90f, 90f);
+        rotations[1] = roll / 90f;
+        
+        float dotProduct = Vector3.Dot(gravityDir, localUp);
+        rotations[2] = Mathf.Sign(dotProduct);
+
+        return rotations;
+    }
+
+    public float[] ForwardPass(float[] inputs)
+    {
+        // Verify input size
+        if (inputs.Length != InputSize)
+        {
+            Debug.LogError($"Input array size ({inputs.Length}) does not match expected InputSize ({InputSize})");
+            return new float[OutputSize]; // Return a zeroed array to avoid crashing
+        }
+
+        // Verify weightsInputHidden1 dimensions
+        if (weightsInputHidden1.GetLength(0) != InputSize || weightsInputHidden1.GetLength(1) != HiddenSize1)
+        {
+            Debug.LogError($"weightsInputHidden1 dimensions ({weightsInputHidden1.GetLength(0)}x{weightsInputHidden1.GetLength(1)}) do not match expected ({InputSize}x{HiddenSize1})");
+            return new float[OutputSize];
+        }
+
+        
+        // Step 1: Check and clamp inputs
+        for (int i = 0; i < inputs.Length; i++)
+        {
+            if (float.IsNaN(inputs[i]))
+            {
+                Debug.LogWarning($"NaN detected in inputs[{i}], setting to 0");
+                inputs[i] = 0f;
+            }
+            inputs[i] = Mathf.Clamp(inputs[i], -10f, 10f); // Arbitrary range to avoid extreme values
+        }
+
+        // Step 2: Hidden Layer 1
         float[] hidden1 = new float[HiddenSize1];
         for (int i = 0; i < HiddenSize1; i++)
         {
-            hidden1[i] = biasesHidden1[i];
+            float preActivation = biasesHidden1[i];
+            if (float.IsNaN(preActivation))
+            {
+                Debug.LogWarning($"NaN in biasesHidden1[{i}], setting to 0");
+                preActivation = 0f;
+            }
             for (int j = 0; j < InputSize; j++)
-                hidden1[i] += inputs[j] * weightsInputHidden1[j, i];
-            hidden1[i] = Mathf.Max(0, hidden1[i]);
+            {
+                float weight = weightsInputHidden1[j, i];
+                if (float.IsNaN(weight))
+                {
+                    Debug.LogWarning($"NaN in weightsInputHidden1[{j},{i}], setting to 0");
+                    weight = 0f;
+                    weightsInputHidden1[j, i] = 0f; // Fix the weight to prevent future issues
+                }
+                preActivation += inputs[j] * weight;
+            }
+            preActivation = Mathf.Clamp(preActivation, -50f, 50f); // Limit to avoid overflow
+            hidden1[i] = Mathf.Max(0, preActivation); // ReLU activation
+            if (float.IsNaN(hidden1[i]))
+            {
+                Debug.LogError($"NaN detected in hidden1[{i}] after ReLU, setting to 0");
+                hidden1[i] = 0f;
+            }
         }
 
+        // Step 3: Hidden Layer 2
         float[] hidden2 = new float[HiddenSize2];
         for (int i = 0; i < HiddenSize2; i++)
         {
-            hidden2[i] = biasesHidden2[i];
+            float preActivation = biasesHidden2[i];
+            if (float.IsNaN(preActivation))
+            {
+                Debug.LogWarning($"NaN in biasesHidden2[{i}], setting to 0");
+                preActivation = 0f;
+            }
             for (int j = 0; j < HiddenSize1; j++)
-                hidden2[i] += hidden1[j] * weightsHidden1Hidden2[j, i];
-            hidden2[i] = Mathf.Max(0, hidden2[i]);
+            {
+                float weight = weightsHidden1Hidden2[j, i];
+                if (float.IsNaN(weight))
+                {
+                    Debug.LogWarning($"NaN in weightsHidden1Hidden2[{j},{i}], setting to 0");
+                    weight = 0f;
+                    weightsHidden1Hidden2[j, i] = 0f;
+                }
+                preActivation += hidden1[j] * weight;
+            }
+            preActivation = Mathf.Clamp(preActivation, -50f, 50f);
+            hidden2[i] = Mathf.Max(0, preActivation); // ReLU activation
+            if (float.IsNaN(hidden2[i]))
+            {
+                Debug.LogError($"NaN detected in hidden2[{i}] after ReLU, setting to 0");
+                hidden2[i] = 0f;
+            }
         }
 
+        // Step 4: Hidden Layer 3
+        float[] hidden3 = new float[HiddenSize3];
+        for (int i = 0; i < HiddenSize3; i++)
+        {
+            float preActivation = biasesHidden3[i];
+            if (float.IsNaN(preActivation))
+            {
+                Debug.LogWarning($"NaN in biasesHidden3[{i}], setting to 0");
+                preActivation = 0f;
+            }
+            for (int j = 0; j < HiddenSize2; j++)
+            {
+                float weight = weightsHidden2Hidden3[j, i];
+                if (float.IsNaN(weight))
+                {
+                    Debug.LogWarning($"NaN in weightsHidden2Hidden3[{j},{i}], setting to 0");
+                    weight = 0f;
+                    weightsHidden2Hidden3[j, i] = 0f;
+                }
+                preActivation += hidden2[j] * weight;
+            }
+            preActivation = Mathf.Clamp(preActivation, -50f, 50f);
+            hidden3[i] = Mathf.Max(0, preActivation); // ReLU activation
+            if (float.IsNaN(hidden3[i]))
+            {
+                Debug.LogError($"NaN detected in hidden3[{i}] after ReLU, setting to 0");
+                hidden3[i] = 0f;
+            }
+        }
+
+        // Step 5: Output Layer
         float[] outputs = new float[OutputSize];
         for (int i = 0; i < OutputSize; i++)
         {
-            outputs[i] = biasesOutput[i];
-            for (int j = 0; j < HiddenSize2; j++)
+            float preActivation = biasesOutput[i];
+            if (float.IsNaN(preActivation))
             {
-                outputs[i] += hidden2[j] * weightsHidden2Output[j, i];
+                Debug.LogWarning($"NaN in biasesOutput[{i}], setting to 0");
+                preActivation = 0f;
             }
-            outputs[i] = (float)Math.Tanh(outputs[i]);
-        }
-        return outputs;
-    }
+            for (int j = 0; j < HiddenSize3; j++)
+            {
+                float weight = weightsHidden3Output[j, i];
+                if (float.IsNaN(weight))
+                {
+                    Debug.LogWarning($"NaN in weightsHidden3Output[{j},{i}], setting to 0");
+                    weight = 0f;
+                    weightsHidden3Output[j, i] = 0f;
+                }
+                preActivation += hidden3[j] * weight;
+            }
+            preActivation = Mathf.Clamp(preActivation, -50f, 50f); // Limit to avoid overflow
+            outputs[i] = (float)Math.Tanh(preActivation);
+            if (float.IsNaN(outputs[i]))
+            {
+                Debug.LogError($"NaN detected in Tanh output[{i}] before thresholding, setting to 0");
+                outputs[i] = 0f;
+            }
 
+            // Fix thresholding (Tanh outputs are in [-1, 1], so 3.5 is unreachable)
+            if (outputs[i] > 0.35f) // Adjusted to match Tanh range
+                outputs[i] = 1f;
+            else if (outputs[i] < -0.35f)
+                outputs[i] = -1f;
+            else
+                outputs[i] = 0f;
+        }
+
+        // Step 6: Final check for outputs
+        for (int i = 0; i < OutputSize; i++)
+        {
+            if (float.IsNaN(outputs[i]))
+            {
+                Debug.LogError($"NaN detected in final outputs[{i}], setting to 0");
+                outputs[i] = 0f;
+            }
+        }
+
+        return outputs;
+    }   
     private void InitializeWeights(float[,] weights)
     {
         int rows = weights.GetLength(0);
@@ -351,7 +570,6 @@ public class NeuralNetwork : MonoBehaviour
         }
     }
 
-    // **Change 6: Gaussian noise helper method**
     private float GaussianNoise(float stdDev)
     {
         float u1 = UnityEngine.Random.value;
@@ -362,10 +580,14 @@ public class NeuralNetwork : MonoBehaviour
 
     private void PerturbWeights(float perturbationScale)
     {
-        
         for (int i = 0; i < InputSize; i++)
         {
             float noise = GaussianNoise(perturbationScale);
+            if (float.IsNaN(noise) || float.IsInfinity(noise))
+            {
+                Debug.LogWarning("NaN or Infinity in GaussianNoise, returning 0");
+                
+            }
             for (int j = 0; j < HiddenSize1; j++)
             {
                 weightsInputHidden1[i, j] += noise;
@@ -384,9 +606,18 @@ public class NeuralNetwork : MonoBehaviour
         for (int i = 0; i < HiddenSize2; i++)
         {
             float noise = GaussianNoise(perturbationScale);
+            for (int j = 0; j < HiddenSize3; j++)
+            {
+                weightsHidden2Hidden3[i, j] += noise;
+            }
+        }
+
+        for (int i = 0; i < HiddenSize3; i++)
+        {
+            float noise = GaussianNoise(perturbationScale);
             for (int j = 0; j < OutputSize; j++)
             {
-                weightsHidden2Output[i, j] += noise;
+                weightsHidden3Output[i, j] += noise;
             }
         }
 
@@ -406,13 +637,13 @@ public class NeuralNetwork : MonoBehaviour
     public void Train(float[][] states, float[][] actions, float[] rewards)
     {
         float[] returns = ComputeReturns(rewards, gamma: 0.99f);
-        float learningRate = 0.005f;
+        
         UpdateWeights(states, actions, returns, learningRate);
 
         trainingLoopCounter++;
-        if (trainingLoopCounter % 10 == 0)
+        if (trainingLoopCounter % 1 == 0)
         {
-            float perturbationScale = 0.05f;
+            
             PerturbWeights(perturbationScale);
         }
 
@@ -493,12 +724,22 @@ public class NeuralNetwork : MonoBehaviour
                 hidden2[i] = Mathf.Max(0, hidden2PreActivation[i]);
             }
 
+            float[] hidden3 = new float[HiddenSize3];
+            float[] hidden3PreActivation = new float[HiddenSize3];
+            for (int i = 0; i < HiddenSize3; i++)
+            {
+                hidden3PreActivation[i] = biasesHidden3[i];
+                for (int j = 0; j < HiddenSize2; j++)
+                    hidden3PreActivation[i] += hidden2[j] * weightsHidden2Hidden3[j, i];
+                hidden3[i] = Mathf.Max(0, hidden3PreActivation[i]);
+            }
+
             float[] outputs = new float[OutputSize];
             for (int i = 0; i < OutputSize; i++)
             {
                 outputs[i] = biasesOutput[i];
-                for (int j = 0; j < HiddenSize2; j++)
-                    outputs[i] += hidden2[j] * weightsHidden2Output[j, i];
+                for (int j = 0; j < HiddenSize3; j++)
+                    outputs[i] += hidden3[j] * weightsHidden3Output[j, i];
                 outputs[i] = (float)Math.Tanh(outputs[i]);
             }
 
@@ -510,27 +751,37 @@ public class NeuralNetwork : MonoBehaviour
                     outputGradients[i] = 0f;
             }
 
+            float[] hidden3Gradients = new float[HiddenSize3];
+            for (int i = 0; i < HiddenSize3; i++)
+            {
+                hidden3Gradients[i] = 0f;
+                for (int j = 0; j < OutputSize; j++)
+                {
+                    hidden3Gradients[i] += outputGradients[j] * weightsHidden3Output[i, j];
+                    float weightUpdate = learningRate * hidden3[i] * outputGradients[j];
+                    if (!float.IsNaN(weightUpdate) && !float.IsInfinity(weightUpdate))
+                        weightsHidden3Output[i, j] += weightUpdate;
+                }
+                float biasUpdate = learningRate * hidden3Gradients[i] * (hidden3PreActivation[i] > 0 ? 1f : 0f);
+                if (!float.IsNaN(biasUpdate) && !float.IsInfinity(biasUpdate))
+                    biasesHidden3[i] += biasUpdate;
+            }
+
             float[] hidden2Gradients = new float[HiddenSize2];
             for (int i = 0; i < HiddenSize2; i++)
             {
                 hidden2Gradients[i] = 0f;
-                for (int j = 0; j < OutputSize; j++)
+                for (int j = 0; j < HiddenSize3; j++)
                 {
-                    hidden2Gradients[i] += outputGradients[j] * weightsHidden2Output[i, j];
-                    float weightUpdate = learningRate * hidden2[i] * outputGradients[j];
+                    float grad = hidden3Gradients[j] * (hidden3PreActivation[j] > 0 ? 1f : 0f);
+                    hidden2Gradients[i] += grad * weightsHidden2Hidden3[i, j];
+                    float weightUpdate = learningRate * hidden2[i] * grad;
                     if (!float.IsNaN(weightUpdate) && !float.IsInfinity(weightUpdate))
-                        weightsHidden2Output[i, j] += weightUpdate;
+                        weightsHidden2Hidden3[i, j] += weightUpdate;
                 }
                 float biasUpdate = learningRate * hidden2Gradients[i] * (hidden2PreActivation[i] > 0 ? 1f : 0f);
                 if (!float.IsNaN(biasUpdate) && !float.IsInfinity(biasUpdate))
                     biasesHidden2[i] += biasUpdate;
-            }
-
-            for (int i = 0; i < OutputSize; i++)
-            {
-                float biasUpdate = learningRate * outputGradients[i];
-                if (!float.IsNaN(biasUpdate) && !float.IsInfinity(biasUpdate))
-                    biasesOutput[i] += biasUpdate;
             }
 
             float[] hidden1Gradients = new float[HiddenSize1];
@@ -559,6 +810,112 @@ public class NeuralNetwork : MonoBehaviour
                     if (!float.IsNaN(weightUpdate) && !float.IsInfinity(weightUpdate))
                         weightsInputHidden1[i, j] += weightUpdate;
                 }
+            }
+
+            for (int i = 0; i < OutputSize; i++)
+            {
+                float biasUpdate = learningRate * outputGradients[i];
+                if (!float.IsNaN(biasUpdate) && !float.IsInfinity(biasUpdate))
+                    biasesOutput[i] += biasUpdate;
+            }
+        }
+
+        // Sanitize weights and biases after updates
+        SanitizeWeightsAndBiases();
+    }
+
+    // Helper method to sanitize weights and biases
+    private void SanitizeWeightsAndBiases()
+    {
+        // Sanitize weightsInputHidden1
+        for (int i = 0; i < weightsInputHidden1.GetLength(0); i++)
+        {
+            for (int j = 0; j < weightsInputHidden1.GetLength(1); j++)
+            {
+                if (float.IsNaN(weightsInputHidden1[i, j]) || float.IsInfinity(weightsInputHidden1[i, j]))
+                {
+                    Debug.LogWarning($"Invalid value in weightsInputHidden1[{i},{j}] = {weightsInputHidden1[i, j]}, setting to 0");
+                    weightsInputHidden1[i, j] = 0f;
+                }
+            }
+        }
+
+        // Sanitize weightsHidden1Hidden2
+        for (int i = 0; i < weightsHidden1Hidden2.GetLength(0); i++)
+        {
+            for (int j = 0; j < weightsHidden1Hidden2.GetLength(1); j++)
+            {
+                if (float.IsNaN(weightsHidden1Hidden2[i, j]) || float.IsInfinity(weightsHidden1Hidden2[i, j]))
+                {
+                    Debug.LogWarning($"Invalid value in weightsHidden1Hidden2[{i},{j}] = {weightsHidden1Hidden2[i, j]}, setting to 0");
+                    weightsHidden1Hidden2[i, j] = 0f;
+                }
+            }
+        }
+
+        // Sanitize weightsHidden2Hidden3
+        for (int i = 0; i < weightsHidden2Hidden3.GetLength(0); i++)
+        {
+            for (int j = 0; j < weightsHidden2Hidden3.GetLength(1); j++)
+            {
+                if (float.IsNaN(weightsHidden2Hidden3[i, j]) || float.IsInfinity(weightsHidden2Hidden3[i, j]))
+                {
+                    Debug.LogWarning($"Invalid value in weightsHidden2Hidden3[{i},{j}] = {weightsHidden2Hidden3[i, j]}, setting to 0");
+                    weightsHidden2Hidden3[i, j] = 0f;
+                }
+            }
+        }
+
+        // Sanitize weightsHidden3Output
+        for (int i = 0; i < weightsHidden3Output.GetLength(0); i++)
+        {
+            for (int j = 0; j < weightsHidden3Output.GetLength(1); j++)
+            {
+                if (float.IsNaN(weightsHidden3Output[i, j]) || float.IsInfinity(weightsHidden3Output[i, j]))
+                {
+                    Debug.LogWarning($"Invalid value in weightsHidden3Output[{i},{j}] = {weightsHidden3Output[i, j]}, setting to 0");
+                    weightsHidden3Output[i, j] = 0f;
+                }
+            }
+        }
+
+        // Sanitize biasesHidden1
+        for (int i = 0; i < biasesHidden1.Length; i++)
+        {
+            if (float.IsNaN(biasesHidden1[i]) || float.IsInfinity(biasesHidden1[i]))
+            {
+                Debug.LogWarning($"Invalid value in biasesHidden1[{i}] = {biasesHidden1[i]}, setting to 0");
+                biasesHidden1[i] = 0f;
+            }
+        }
+
+        // Sanitize biasesHidden2
+        for (int i = 0; i < biasesHidden2.Length; i++)
+        {
+            if (float.IsNaN(biasesHidden2[i]) || float.IsInfinity(biasesHidden2[i]))
+            {
+                Debug.LogWarning($"Invalid value in biasesHidden2[{i}] = {biasesHidden2[i]}, setting to 0");
+                biasesHidden2[i] = 0f;
+            }
+        }
+
+        // Sanitize biasesHidden3
+        for (int i = 0; i < biasesHidden3.Length; i++)
+        {
+            if (float.IsNaN(biasesHidden3[i]) || float.IsInfinity(biasesHidden3[i]))
+            {
+                Debug.LogWarning($"Invalid value in biasesHidden3[{i}] = {biasesHidden3[i]}, setting to 0");
+                biasesHidden3[i] = 0f;
+            }
+        }
+
+        // Sanitize biasesOutput
+        for (int i = 0; i < biasesOutput.Length; i++)
+        {
+            if (float.IsNaN(biasesOutput[i]) || float.IsInfinity(biasesOutput[i]))
+            {
+                Debug.LogWarning($"Invalid value in biasesOutput[{i}] = {biasesOutput[i]}, setting to 0");
+                biasesOutput[i] = 0f;
             }
         }
     }
@@ -597,7 +954,9 @@ public class NeuralNetwork : MonoBehaviour
         public float[] biasesHidden1;
         public SerializableMatrix weightsHidden1Hidden2;
         public float[] biasesHidden2;
-        public SerializableMatrix weightsHidden2Output;
+        public SerializableMatrix weightsHidden2Hidden3; // New field for weights
+        public float[] biasesHidden3; // New field for biases
+        public SerializableMatrix weightsHidden3Output;
         public float[] biasesOutput;
         public float skillNumber;
     }
